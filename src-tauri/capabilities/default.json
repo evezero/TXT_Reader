@@ -1,7 +1,9 @@
 {
   "identifier": "default",
   "description": "Default capability for TXT Reader",
-  "windows": ["main"],
+  "windows": [
+    "*"
+  ],
   "permissions": [
     "core:default",
     "dialog:default",
@@ -14,6 +16,10 @@
     "core:window:allow-toggle-maximize",
     "core:window:allow-set-size",
     "core:window:allow-inner-size",
-    "core:window:allow-set-always-on-top"
+    "core:window:allow-set-always-on-top",
+    "core:window:allow-create",
+    "core:window:allow-hide",
+    "core:window:allow-show",
+    "core:webview:allow-create-webview-window"
   ]
 }

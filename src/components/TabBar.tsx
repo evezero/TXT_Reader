@@ -50,7 +50,6 @@ export function TabBar({ tabs, activeTabId, onTabClick, onTabClose, onOpenFile }
           </span>
         </button>
       ))}
-
       <button
         className="tab-add"
         onClick={onOpenFile}

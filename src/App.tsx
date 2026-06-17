@@ -86,7 +86,18 @@ export default function App() {
   const [currentParagraphIndex, setCurrentParagraphIndex] = useState(0)
   const [readingProgress, setReadingProgress] = useState(0)
   const [transitioning, setTransitioning] = useState(false)
-  const [isBossMode, setIsBossMode] = useState(false)
+  const urlParams = new URLSearchParams(window.location.search)
+  const initBossMode = urlParams.get('boss') === 'true'
+  const initFile = urlParams.get('file')
+
+  const [isBossMode, setIsBossMode] = useState(initBossMode)
+  const hasLoadedInitRef = useRef(false)
+  
+  const [splitTabId, setSplitTabId] = useState<string | null>(null)
+  const [showReplace, setShowReplace] = useState(false)
+  const [findText, setFindText] = useState('')
+  const [replaceText, setReplaceText] = useState('')
+  const [bossOpacity, setBossOpacity] = useState(0.95)
 
   const readerRef = useRef<ReaderHandle>(null)
   const originalSizeRef = useRef<any>(null)
@@ -240,6 +251,32 @@ export default function App() {
     }
   }, [loadFile, addToast])
 
+  // ─── 批量替换 ──────────────────────────────────────────────────────────
+  const handleBatchReplace = useCallback(async () => {
+    if (!activeTab || !activeTab.filePath || !activeTab.content || !findText) return
+    const newContent = activeTab.content.split(findText).join(replaceText)
+    if (newContent === activeTab.content) {
+      addToast('未找到可替换的内容', 'info')
+      return
+    }
+    try {
+      const res = await invoke<any>('write_file', { path: activeTab.filePath, content: newContent })
+      if (!res.success) throw new Error(res.error)
+      
+      const chapters = parseChapters(newContent, {
+        customSeparator: activeTab.meta?.customSeparator,
+        manualHeadings: activeTab.meta?.manualHeadings,
+      })
+      const paragraphs = splitParagraphs(newContent)
+      
+      setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, content: newContent, chapters, paragraphs } : t))
+      addToast('批量替换成功', 'success')
+      setShowReplace(false)
+    } catch (err) {
+      addToast('替换失败: ' + String(err), 'error')
+    }
+  }, [activeTab, activeTabId, findText, replaceText, addToast])
+
   // ─── Tab 管理 ──────────────────────────────────────────────────────────
   const handleCloseTab = useCallback(
     (tabId: string) => {
@@ -359,10 +396,15 @@ export default function App() {
     const handleKeyDown = async (e: KeyboardEvent) => {
       if (e.key === 'Escape' && isBossMode) {
         setIsBossMode(false)
-        const appWindow = getCurrentWindow()
-        await appWindow.setAlwaysOnTop(false)
-        if (originalSizeRef.current) {
-          await appWindow.setSize(originalSizeRef.current)
+        try {
+          const { Window, getCurrentWindow } = await import('@tauri-apps/api/window')
+          const mainWindow = await Window.getByLabel('main')
+          if (mainWindow) {
+            await mainWindow.show()
+          }
+          await getCurrentWindow().close()
+        } catch (err) {
+          console.error('Failed to close boss mode window:', err)
         }
       }
 
@@ -453,7 +495,14 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [handleOpenFile, activeTab, activeTabId, currentChapterIndex, handleCloseTab, addToast])
+  }, [handleOpenFile, activeTab, activeTabId, currentChapterIndex, handleCloseTab, addToast, isBossMode])
+
+  useEffect(() => {
+    if (initBossMode && initFile && !hasLoadedInitRef.current) {
+      hasLoadedInitRef.current = true
+      loadFile(initFile)
+    }
+  }, [initBossMode, initFile, loadFile])
 
   // ─── 渲染 ─────────────────────────────────────────────────────────────
   const currentChapter = activeTab?.chapters?.[currentChapterIndex]
@@ -482,9 +531,20 @@ export default function App() {
   return (
     <div
       className={`app-root ${transitioning ? 'theme-transition' : ''} ${isBossMode ? 'boss-mode' : ''}`}
+      onMouseDown={(e) => {
+        if (isBossMode && e.button === 0) {
+          import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
+            getCurrentWindow().startDragging()
+          })
+        }
+      }}
       style={{
         ['--bg' as string]: effectiveTheme?.background,
         ['--text' as string]: effectiveTheme?.text,
+        background: isBossMode ? 'transparent' : 'var(--bg)',
+        display: 'flex',
+        flexDirection: 'column',
+        height: '100vh',
       }}
     >
       {/* 顶部进度条 */}
@@ -583,15 +643,77 @@ export default function App() {
           </button>
           <div className="toolbar-separator" />
           <button
+            className={`toolbar-btn ${showReplace ? 'active' : ''}`}
+            onClick={() => setShowReplace((p) => !p)}
+            title="查找与替换"
+            aria-label="查找与替换"
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <path d="M11 11l3.5 3.5M12.5 6.5a6 6 0 1 1-12 0 6 6 0 0 1 12 0z"/>
+            </svg>
+          </button>
+          <div className="toolbar-separator" />
+          <button
+            className={`toolbar-btn ${splitTabId ? 'active' : ''}`}
+            onClick={() => {
+              if (splitTabId) {
+                setSplitTabId(null)
+              } else {
+                const otherTabs = tabs.filter(t => t.id !== activeTabId)
+                if (otherTabs.length > 0) {
+                  setSplitTabId(otherTabs[0].id)
+                } else {
+                  addToast('没有其他已打开的标签页可用于分屏对比', 'info')
+                }
+              }
+            }}
+            title="双页对比"
+            aria-label="双页对比"
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <rect x="1" y="2" width="6" height="12" rx="1" />
+              <rect x="9" y="2" width="6" height="12" rx="1" />
+            </svg>
+          </button>
+          <div className="toolbar-separator" />
+          <button
             className="toolbar-btn"
             onClick={async () => {
-              const appWindow = getCurrentWindow()
-              originalSizeRef.current = await appWindow.innerSize()
-              await appWindow.setSize(new LogicalSize(400, 120))
-              await appWindow.setAlwaysOnTop(true)
-              setIsBossMode(true)
+              if (splitTabId) {
+                alert('请先关闭分屏模式再进入摸鱼模式')
+                return
+              }
+              if (!activeTab || !activeTab.filePath) {
+                alert('请先打开一本书')
+                return
+              }
+              try {
+                const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow')
+                const { getCurrentWindow } = await import('@tauri-apps/api/window')
+                
+                const bossWindow = new WebviewWindow('boss-' + Date.now(), {
+                  url: `/?boss=true&file=${encodeURIComponent(activeTab.filePath)}`,
+                  width: 400,
+                  height: 120,
+                  transparent: true,
+                  decorations: false,
+                  alwaysOnTop: true,
+                  skipTaskbar: true
+                })
+                
+                bossWindow.once('tauri://created', function () {
+                  getCurrentWindow().hide()
+                })
+                bossWindow.once('tauri://error', function (e) {
+                  console.error(e)
+                  alert('无法创建摸鱼窗口')
+                })
+              } catch (err) {
+                console.error(err)
+                alert('摸鱼模式启动失败')
+              }
             }}
-            title="摸鱼模式 (Esc 退出)"
+            title="摸鱼模式 (独立挂件，Esc退出)"
             aria-label="摸鱼模式"
           >
             🐟
@@ -599,8 +721,42 @@ export default function App() {
         </div>
       )}
 
+      {/* 替换面板 */}
+      {showReplace && !isBossMode && activeTab && (
+        <div style={{ padding: '8px 16px', background: 'var(--panel-bg)', borderBottom: '1px solid var(--border)', display: 'flex', gap: 12, alignItems: 'center', zIndex: 10 }}>
+          <input 
+            type="text" 
+            placeholder="查找内容" 
+            value={findText} 
+            onChange={e => setFindText(e.target.value)} 
+            style={{ padding: '4px 8px', borderRadius: 4, border: '1px solid var(--border)', background: 'var(--input-bg)', color: 'var(--text)', outline: 'none' }}
+          />
+          <input 
+            type="text" 
+            placeholder="替换为" 
+            value={replaceText} 
+            onChange={e => setReplaceText(e.target.value)} 
+            style={{ padding: '4px 8px', borderRadius: 4, border: '1px solid var(--border)', background: 'var(--input-bg)', color: 'var(--text)', outline: 'none' }}
+          />
+          <button 
+            onClick={handleBatchReplace}
+            style={{ padding: '4px 12px', borderRadius: 4, border: 'none', background: 'var(--accent)', color: 'white', cursor: 'pointer' }}
+          >
+            全部替换
+          </button>
+          <button 
+            onClick={() => setShowReplace(false)}
+            style={{ padding: '4px 12px', borderRadius: 4, border: '1px solid var(--border)', background: 'transparent', color: 'var(--text)', cursor: 'pointer' }}
+          >
+            取消
+          </button>
+        </div>
+      )}
+
+      {/* 摸鱼模式：纯文本，无任何 UI 元素 */}
+
       {/* 主体 */}
-      <div className="main-area" data-tauri-drag-region={isBossMode}>
+      <div className="main-area" data-tauri-drag-region={isBossMode ? true : undefined} style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
         {!isBossMode && tabs.length > 0 && (
           <Sidebar
             tab={activeTab}
@@ -615,16 +771,53 @@ export default function App() {
         {tabs.length === 0 ? (
           <Bookshelf onOpenBook={loadFile} />
         ) : activeTab ? (
-          <Reader
-            ref={readerRef}
-            tab={activeTab}
-            style={readerStyle}
-            onProgressChange={handleProgressChange}
-            onChapterChange={setCurrentChapterIndex}
-            manualHeadings={activeTab.meta?.manualHeadings ?? []}
-            onRelocateFile={handleOpenFile}
-            onEditParagraph={handleEditParagraph}
-          />
+          <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', flex: 1, borderRight: splitTabId ? '1px solid var(--border)' : 'none', overflow: 'hidden', position: 'relative' }}>
+              <Reader
+                ref={readerRef}
+                tab={activeTab}
+                style={readerStyle}
+                onProgressChange={handleProgressChange}
+                onChapterChange={setCurrentChapterIndex}
+                manualHeadings={activeTab.meta?.manualHeadings ?? []}
+                onRelocateFile={handleOpenFile}
+                onEditParagraph={handleEditParagraph}
+                isBossMode={isBossMode}
+              />
+            </div>
+            {splitTabId && tabs.find(t => t.id === splitTabId) && (
+              <div style={{ display: 'flex', flexDirection: 'column', flex: 1, overflow: 'hidden', position: 'relative', borderLeft: '1px solid var(--border)' }}>
+                <Reader
+                  tab={tabs.find(t => t.id === splitTabId)!}
+                  style={readerStyle}
+                  onProgressChange={() => {}}
+                  onChapterChange={() => {}}
+                  manualHeadings={tabs.find(t => t.id === splitTabId)?.meta?.manualHeadings ?? []}
+                  onRelocateFile={handleOpenFile}
+                  onEditParagraph={handleEditParagraph}
+                />
+                {!isBossMode && (
+                  <div style={{ position: 'absolute', top: 8, right: 16, zIndex: 10, display: 'flex', gap: 8, background: 'var(--panel-bg)', padding: '4px 8px', borderRadius: 4, boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}>
+                    <select 
+                      value={splitTabId} 
+                      onChange={e => setSplitTabId(e.target.value)}
+                      style={{ background: 'var(--input-bg)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 4, padding: '2px 4px' }}
+                    >
+                      {tabs.map(t => (
+                        <option key={t.id} value={t.id}>{t.fileName}</option>
+                      ))}
+                    </select>
+                    <button 
+                      onClick={() => setSplitTabId(null)}
+                      style={{ background: 'transparent', color: 'var(--text)', border: 'none', cursor: 'pointer', padding: '0 4px' }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         ) : (
           <Bookshelf onOpenBook={loadFile} />
         )}

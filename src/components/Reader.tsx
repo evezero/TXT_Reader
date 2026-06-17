@@ -18,10 +18,11 @@ interface ReaderProps {
   manualHeadings: number[]
   onRelocateFile?: () => void
   onEditParagraph?: (index: number, newText: string) => void
+  isBossMode?: boolean
 }
 
 export const Reader = forwardRef<ReaderHandle, ReaderProps>(function Reader(
-  { tab, style, onProgressChange, onChapterChange, manualHeadings, onRelocateFile, onEditParagraph },
+  { tab, style, onProgressChange, onChapterChange, manualHeadings, onRelocateFile, onEditParagraph, isBossMode },
   ref
 ) {
   const virtuosoRef = useRef<VirtuosoHandle>(null)
@@ -29,7 +30,8 @@ export const Reader = forwardRef<ReaderHandle, ReaderProps>(function Reader(
 
   const paragraphs = tab.paragraphs ?? []
   const chapters: Chapter[] = tab.chapters ?? []
-
+  
+  // ... rest of the file stays same until itemContent
   const isChapterTitle = useCallback(
     (paraIndex: number): boolean => {
       return chapters.some((ch) => ch.paragraphStart === paraIndex)
@@ -149,8 +151,8 @@ export const Reader = forwardRef<ReaderHandle, ReaderProps>(function Reader(
           initialTopMostItemIndex={tab.meta?.progress?.paragraphIndex ?? 0}
           rangeChanged={handleRangeChanged}
           components={{
-            Header: () => <div style={{ height: 40 }} />,
-            Footer: () => <div style={{ height: 120 }} />
+            Header: () => <div style={{ height: 40 }} data-tauri-drag-region={isBossMode ? true : undefined} />,
+            Footer: () => <div style={{ height: 120 }} data-tauri-drag-region={isBossMode ? true : undefined} />
           }}
           itemContent={(index, para) => {
             const isTitle = isChapterTitle(index)
@@ -159,12 +161,96 @@ export const Reader = forwardRef<ReaderHandle, ReaderProps>(function Reader(
               <p
                 className={`reader-paragraph ${isTitle ? 'chapter-title' : ''} ${isMarked ? 'marked-heading' : ''}`}
                 data-para-index={index}
-                contentEditable
+                data-tauri-drag-region={isBossMode ? true : undefined}
+                contentEditable={!isBossMode}
                 suppressContentEditableWarning
                 onBlur={(e) => {
                   const newText = e.currentTarget.innerText
                   if (newText !== para && onEditParagraph) {
                     onEditParagraph(index, newText)
+                  }
+                }}
+                onKeyDown={(e) => {
+                  const el = e.currentTarget
+                  const sel = window.getSelection()
+                  if (!sel || sel.rangeCount === 0) return
+                  const range = sel.getRangeAt(0)
+                  if (!range.collapsed) return // don't interfere with text selection
+
+                  const textContent = el.textContent || ''
+                  
+                  // Helper: get a flat text offset within the element
+                  const getOffset = (): number => {
+                    const preRange = document.createRange()
+                    preRange.selectNodeContents(el)
+                    preRange.setEnd(range.startContainer, range.startOffset)
+                    return preRange.toString().length
+                  }
+
+                  const offset = getOffset()
+                  const totalLen = textContent.length
+
+                  if (e.key === 'ArrowLeft') {
+                    if (offset === 0) {
+                      e.preventDefault()
+                      const prevEl = document.querySelector(`[data-para-index="${index - 1}"]`) as HTMLElement
+                      if (prevEl) {
+                        prevEl.focus()
+                        const newRange = document.createRange()
+                        newRange.selectNodeContents(prevEl)
+                        newRange.collapse(false) // end
+                        sel.removeAllRanges()
+                        sel.addRange(newRange)
+                      }
+                    }
+                  } else if (e.key === 'ArrowRight') {
+                    if (offset >= totalLen) {
+                      e.preventDefault()
+                      const nextEl = document.querySelector(`[data-para-index="${index + 1}"]`) as HTMLElement
+                      if (nextEl) {
+                        nextEl.focus()
+                        const newRange = document.createRange()
+                        newRange.selectNodeContents(nextEl)
+                        newRange.collapse(true) // start
+                        sel.removeAllRanges()
+                        sel.addRange(newRange)
+                      }
+                    }
+                  } else if (e.key === 'ArrowUp') {
+                    // Check if cursor is on the first visual line
+                    const caretRect = range.getBoundingClientRect()
+                    const elRect = el.getBoundingClientRect()
+                    // If cursor top is near element top (within one line height), we're on first line
+                    const lineH = parseFloat(getComputedStyle(el).lineHeight) || parseFloat(getComputedStyle(el).fontSize) * 1.5
+                    if (caretRect.top - elRect.top < lineH * 0.8 || offset === 0) {
+                      e.preventDefault()
+                      const prevEl = document.querySelector(`[data-para-index="${index - 1}"]`) as HTMLElement
+                      if (prevEl) {
+                        prevEl.focus()
+                        const newRange = document.createRange()
+                        newRange.selectNodeContents(prevEl)
+                        newRange.collapse(false) // go to end of prev paragraph
+                        sel.removeAllRanges()
+                        sel.addRange(newRange)
+                      }
+                    }
+                  } else if (e.key === 'ArrowDown') {
+                    // Check if cursor is on the last visual line
+                    const caretRect = range.getBoundingClientRect()
+                    const elRect = el.getBoundingClientRect()
+                    const lineH = parseFloat(getComputedStyle(el).lineHeight) || parseFloat(getComputedStyle(el).fontSize) * 1.5
+                    if (elRect.bottom - caretRect.bottom < lineH * 0.8 || offset >= totalLen) {
+                      e.preventDefault()
+                      const nextEl = document.querySelector(`[data-para-index="${index + 1}"]`) as HTMLElement
+                      if (nextEl) {
+                        nextEl.focus()
+                        const newRange = document.createRange()
+                        newRange.selectNodeContents(nextEl)
+                        newRange.collapse(true) // go to start of next paragraph
+                        sel.removeAllRanges()
+                        sel.addRange(newRange)
+                      }
+                    }
                   }
                 }}
                 style={{

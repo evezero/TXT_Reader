@@ -170,19 +170,26 @@ export function Bookshelf({ onOpenBook }: BookshelfProps) {
           </div>
           <div style={{ display: 'flex', gap: 12 }}>
             <button className="empty-btn" style={{ padding: '8px 16px', background: 'var(--input-bg)', color: 'var(--text)' }} onClick={handleCreateFolder}>
-              + 新建文件夹
+              新建文件夹
             </button>
             <button className="empty-btn" style={{ padding: '8px 16px' }} onClick={handleAddBooks}>
-              + 添加书籍
+              导入书籍
             </button>
           </div>
         </div>
-
         <div style={{ flex: 1, overflowY: 'auto', padding: '24px 40px' }}>
           {currentNodes.length === 0 ? (
             <div style={{ textAlign: 'center', marginTop: 80, color: 'var(--tab-text)' }}>
               <div style={{ fontSize: 48, marginBottom: 16 }}>📭</div>
-              <p>当前目录为空，点击右上角添加书籍或文件夹</p>
+              <p style={{ marginBottom: 24 }}>当前目录为空，请添加书籍或新建文件夹</p>
+              <div style={{ display: 'flex', gap: 16, justifyContent: 'center' }}>
+                <button className="empty-btn" style={{ padding: '10px 24px', background: 'var(--input-bg)', color: 'var(--text)', fontSize: 15, borderRadius: 6 }} onClick={handleCreateFolder}>
+                  新建文件夹
+                </button>
+                <button className="empty-btn" style={{ padding: '10px 24px', background: 'var(--accent)', color: 'white', fontSize: 15, border: 'none', borderRadius: 6, cursor: 'pointer' }} onClick={handleAddBooks}>
+                  导入书籍
+                </button>
+              </div>
             </div>
           ) : (
             <div className="bookshelf-grid">
