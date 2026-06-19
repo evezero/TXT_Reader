@@ -45,6 +45,7 @@ export interface Tab {
   chapters?: Chapter[]  // 章节列表
   paragraphs?: string[] // 段落列表
   meta?: FileMeta
+  isDirty?: boolean
   errorMessage?: string
 }
 

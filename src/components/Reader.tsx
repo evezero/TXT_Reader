@@ -1,5 +1,4 @@
-import { useEffect, useRef, useCallback, forwardRef, useImperativeHandle } from 'react'
-import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
+import { useEffect, useRef, useCallback, forwardRef, useImperativeHandle, useState } from 'react'
 import type { Tab, ReaderStyle, Chapter } from '../types'
 import { findChapterByParagraph } from '../utils/structureParser'
 import { debouncedSaveMeta, updateProgress } from '../utils/progressStore'
@@ -25,13 +24,85 @@ export const Reader = forwardRef<ReaderHandle, ReaderProps>(function Reader(
   { tab, style, onProgressChange, onChapterChange, manualHeadings, onRelocateFile, onEditParagraph, isBossMode },
   ref
 ) {
-  const virtuosoRef = useRef<VirtuosoHandle>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const paragraphRefs = useRef<Array<HTMLParagraphElement | null>>([])
   const currentParaRef = useRef(tab.meta?.progress?.paragraphIndex ?? 0)
 
   const paragraphs = tab.paragraphs ?? []
   const chapters: Chapter[] = tab.chapters ?? []
   
-  // ... rest of the file stays same until itemContent
+  // Update paragraph refs array size when paragraphs change
+  useEffect(() => {
+    paragraphRefs.current = paragraphRefs.current.slice(0, paragraphs.length)
+  }, [paragraphs.length])
+
+  // Scroll handler to detect current paragraph
+  const handleScroll = useCallback(() => {
+    if (!containerRef.current || paragraphs.length === 0) return
+    const container = containerRef.current
+    const { scrollTop, clientHeight } = container
+    
+    // Find the first paragraph that is visible in the viewport
+    let currentIdx = currentParaRef.current
+    
+    // Simple heuristic: just check around the current index first
+    const checkVisible = (idx: number) => {
+      const el = paragraphRefs.current[idx]
+      if (!el) return false
+      const top = el.offsetTop - container.offsetTop
+      const bottom = top + el.offsetHeight
+      return bottom > scrollTop
+    }
+
+    if (checkVisible(currentIdx)) {
+      // It might be an earlier paragraph
+      while (currentIdx > 0 && checkVisible(currentIdx - 1)) {
+        currentIdx--
+      }
+    } else {
+      // It might be a later paragraph
+      while (currentIdx < paragraphs.length - 1 && !checkVisible(currentIdx)) {
+        currentIdx++
+      }
+    }
+
+    if (currentIdx !== currentParaRef.current && currentIdx >= 0 && currentIdx < paragraphs.length) {
+      currentParaRef.current = currentIdx
+      const currentChapter = findChapterByParagraph(chapters, currentIdx)
+      if (currentChapter) {
+        onChapterChange(currentChapter.index)
+      }
+      onProgressChange(currentChapter?.index ?? 0, currentIdx)
+
+      if (tab.meta && tab.filePath) {
+        const chapterIndex = currentChapter?.index ?? 0
+        const updatedMeta = updateProgress(tab.meta, {
+          chapterIndex,
+          paragraphIndex: currentIdx,
+          scrollRatio: 0,
+        })
+        debouncedSaveMeta(tab.filePath, updatedMeta)
+      }
+    }
+  }, [paragraphs.length, chapters, onChapterChange, onProgressChange, tab.meta, tab.filePath])
+
+  // Initialize scroll position on load
+  useEffect(() => {
+    const initIdx = tab.meta?.progress?.paragraphIndex ?? 0
+    if (initIdx > 0 && initIdx < paragraphs.length && containerRef.current) {
+      // use setTimeout to allow DOM to render
+      setTimeout(() => {
+        const el = paragraphRefs.current[initIdx]
+        if (el && containerRef.current) {
+          containerRef.current.scrollTo({
+            top: el.offsetTop - containerRef.current.offsetTop,
+            behavior: 'auto'
+          })
+        }
+      }, 100)
+    }
+  }, [tab.id]) // Only run when tab changes
+
   const isChapterTitle = useCallback(
     (paraIndex: number): boolean => {
       return chapters.some((ch) => ch.paragraphStart === paraIndex)
@@ -50,46 +121,28 @@ export const Reader = forwardRef<ReaderHandle, ReaderProps>(function Reader(
     scrollToChapter(chapterIndex: number) {
       const ch = chapters[chapterIndex]
       if (!ch) return
-      virtuosoRef.current?.scrollToIndex({
-        index: ch.paragraphStart,
-        align: 'start',
-        behavior: 'smooth'
-      })
+      const el = paragraphRefs.current[ch.paragraphStart]
+      if (el && containerRef.current) {
+        containerRef.current.scrollTo({
+          top: el.offsetTop - containerRef.current.offsetTop,
+          behavior: 'smooth'
+        })
+      }
     },
     scrollToParagraph(paragraphIndex: number) {
-      virtuosoRef.current?.scrollToIndex({
-        index: paragraphIndex,
-        align: 'start',
-        behavior: 'auto'
-      })
+      const el = paragraphRefs.current[paragraphIndex]
+      if (el && containerRef.current) {
+        containerRef.current.scrollTo({
+          top: el.offsetTop - containerRef.current.offsetTop,
+          behavior: 'auto'
+        })
+      }
     },
     getCurrentParagraphIndex() {
       return currentParaRef.current
     },
   }))
 
-  const handleRangeChanged = useCallback(({ startIndex }: { startIndex: number }) => {
-    if (startIndex !== currentParaRef.current) {
-      currentParaRef.current = startIndex
-
-      const currentChapter = findChapterByParagraph(chapters, startIndex)
-      if (currentChapter) {
-        onChapterChange(currentChapter.index)
-      }
-
-      onProgressChange(currentChapter?.index ?? 0, startIndex)
-
-      if (tab.meta && tab.filePath) {
-        const chapterIndex = currentChapter?.index ?? 0
-        const updatedMeta = updateProgress(tab.meta, {
-          chapterIndex,
-          paragraphIndex: startIndex,
-          scrollRatio: 0,
-        })
-        debouncedSaveMeta(tab.filePath, updatedMeta)
-      }
-    }
-  }, [chapters, onChapterChange, onProgressChange, tab.meta, tab.filePath])
 
   if (tab.status === 'loading') {
     return (
@@ -144,21 +197,20 @@ export const Reader = forwardRef<ReaderHandle, ReaderProps>(function Reader(
       }}
     >
       {paragraphs.length > 0 ? (
-        <Virtuoso
-          ref={virtuosoRef}
-          style={{ height: '100%', width: '100%' }}
-          data={paragraphs}
-          initialTopMostItemIndex={tab.meta?.progress?.paragraphIndex ?? 0}
-          rangeChanged={handleRangeChanged}
-          components={{
-            Header: () => <div style={{ height: 40 }} data-tauri-drag-region={isBossMode ? true : undefined} />,
-            Footer: () => <div style={{ height: 120 }} data-tauri-drag-region={isBossMode ? true : undefined} />
-          }}
-          itemContent={(index, para) => {
+        <div
+          ref={containerRef}
+          style={{ height: '100%', width: '100%', overflowY: 'auto' }}
+          onScroll={handleScroll}
+          className="reader-scroll-view"
+        >
+          <div style={{ height: 40 }} data-tauri-drag-region={isBossMode ? true : undefined} />
+          {paragraphs.map((para, index) => {
             const isTitle = isChapterTitle(index)
             const isMarked = isManualHeading(index)
             return (
               <p
+                key={index}
+                ref={(el) => { paragraphRefs.current[index] = el }}
                 className={`reader-paragraph ${isTitle ? 'chapter-title' : ''} ${isMarked ? 'marked-heading' : ''}`}
                 data-para-index={index}
                 data-tauri-drag-region={isBossMode ? true : undefined}
@@ -171,6 +223,11 @@ export const Reader = forwardRef<ReaderHandle, ReaderProps>(function Reader(
                   }
                 }}
                 onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    document.execCommand('insertText', false, '\n')
+                    return
+                  }
                   const el = e.currentTarget
                   const sel = window.getSelection()
                   if (!sel || sel.rangeCount === 0) return
@@ -264,11 +321,12 @@ export const Reader = forwardRef<ReaderHandle, ReaderProps>(function Reader(
                   outline: 'none',
                 }}
               >
-                {para}
+                {para === '' ? <br /> : para}
               </p>
             )
-          }}
-        />
+          })}
+          <div style={{ height: 120 }} data-tauri-drag-region={isBossMode ? true : undefined} />
+        </div>
       ) : (
         <div className="reader-inner">
           <p style={{ textAlign: 'center', opacity: 0.4, marginTop: '20vh' }}>

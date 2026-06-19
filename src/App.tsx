@@ -279,7 +279,26 @@ export default function App() {
 
   // ─── Tab 管理 ──────────────────────────────────────────────────────────
   const handleCloseTab = useCallback(
-    (tabId: string) => {
+    async (tabId: string) => {
+      const targetTab = tabs.find((t) => t.id === tabId)
+      if (targetTab?.isDirty) {
+        try {
+          const { ask } = await import('@tauri-apps/plugin-dialog')
+          const yes = await ask(`文件已修改，是否保存？\n${targetTab.fileName}`, { title: '未保存的更改', kind: 'warning' })
+          if (yes) {
+            const { invoke } = await import('@tauri-apps/api/core')
+            const res = await invoke<any>('write_file', { path: targetTab.filePath, content: targetTab.content })
+            if (!res.success) {
+              addToast('保存失败: ' + res.error, 'error')
+              return // 放弃关闭
+            }
+            addToast('文件已保存', 'success')
+          }
+        } catch (err) {
+          console.error(err)
+        }
+      }
+
       setTabs((prev) => {
         const idx = prev.findIndex((t) => t.id === tabId)
         const newTabs = prev.filter((t) => t.id !== tabId)
@@ -290,7 +309,7 @@ export default function App() {
         return newTabs
       })
     },
-    [activeTabId]
+    [tabs, activeTabId, addToast]
   )
 
   // ─── 持久化 Tab 列表 ───────────────────────────────────────────────────
@@ -391,9 +410,27 @@ export default function App() {
     [activeTab, activeTabId]
   )
 
+  const handleSaveFile = useCallback(async () => {
+    if (!activeTab || !activeTab.isDirty || !activeTab.content) return
+    try {
+      const res = await invoke<any>('write_file', { path: activeTab.filePath, content: activeTab.content })
+      if (!res.success) throw new Error(res.error)
+      setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, isDirty: false } : t))
+      addToast('文件已保存', 'success')
+    } catch (err) {
+      addToast('保存失败: ' + String(err), 'error')
+    }
+  }, [activeTab, activeTabId, addToast])
+
   // ─── 键盘快捷键 ───────────────────────────────────────────────────────
   useEffect(() => {
     const handleKeyDown = async (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault()
+        await handleSaveFile()
+        return
+      }
+
       if (e.key === 'Escape' && isBossMode) {
         setIsBossMode(false)
         try {
@@ -495,7 +532,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [handleOpenFile, activeTab, activeTabId, currentChapterIndex, handleCloseTab, addToast, isBossMode])
+  }, [handleOpenFile, activeTab, activeTabId, currentChapterIndex, handleCloseTab, handleSaveFile, addToast, isBossMode])
 
   useEffect(() => {
     if (initBossMode && initFile && !hasLoadedInitRef.current) {
@@ -516,17 +553,10 @@ export default function App() {
     if (!activeTab || !activeTab.filePath || !activeTab.paragraphs) return
     const newParagraphs = [...activeTab.paragraphs]
     newParagraphs[paraIndex] = newText
-    const newContent = newParagraphs.join('\n\n')
+    const newContent = newParagraphs.join('\n')
 
-    try {
-      const res = await invoke<any>('write_file', { path: activeTab.filePath, content: newContent })
-      if (!res.success) throw new Error(res.error)
-      setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, content: newContent, paragraphs: newParagraphs } : t))
-      addToast('已保存修改', 'success')
-    } catch (err) {
-      addToast('保存失败: ' + String(err), 'error')
-    }
-  }, [activeTab, activeTabId, addToast])
+    setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, content: newContent, paragraphs: newParagraphs, isDirty: true } : t))
+  }, [activeTab, activeTabId])
 
   return (
     <div
@@ -573,7 +603,14 @@ export default function App() {
           activeTabId={activeTabId}
           onTabClick={setActiveTabId}
           onTabClose={handleCloseTab}
-          onOpenFile={handleOpenFile}
+          onSaveFile={handleSaveFile}
+          onOpenFile={() => {
+            if (activeTabId) {
+              setActiveTabId(null)
+            } else {
+              handleOpenFile()
+            }
+          }}
         />
       )}
 

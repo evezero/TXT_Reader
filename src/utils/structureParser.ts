@@ -6,11 +6,15 @@ import type { Chapter } from '../types'
  */
 
 // ─── 策略 A：中文网文正则 ─────────────────────────────────────────────────
-const CHINESE_CHAPTER_RE = /^(第\s*[\u4e00-\u9fa5\d〇零一二三四五六七八九十百千万]+\s*[章回节集卷篇]|第\s*\d+\s*[章回节集卷篇])/
+const CHINESE_CHAPTER_RE = /^(第\s*[\u4e00-\u9fa5\d〇零一二三四五六七八九十百千万]+\s*(章|回|节|集|卷|篇|部|部分)|第\s*\d+\s*(章|回|节|集|卷|篇|部|部分))/
 
 // ─── 策略 B：英文 Chapter ─────────────────────────────────────────────────
 const ROMAN_NUMERALS = /^M{0,4}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$/i
 const ENGLISH_CHAPTER_RE = /^(Chapter\s+\d+|CHAPTER\s+\d+|Part\s+\d+|PART\s+\d+|Book\s+\d+|BOOK\s+\d+)/i
+
+// ─── 策略 B2：纯数字（如 "十四" 或 "14"）──────────────────────────────────
+const BARE_CHAPTER_RE = /^[〇零一二三四五六七八九十百千万\d]+[、. \t]*$/
+
 
 function isRomanNumeral(s: string): boolean {
   const trimmed = s.trim()
@@ -18,13 +22,19 @@ function isRomanNumeral(s: string): boolean {
 }
 
 // ─── 策略 C：缩进启发式 ───────────────────────────────────────────────────
-const ENDING_PUNCTUATION = /[，。！？、；：""''【】「」…—～,.!?;:]$/
-
 function isHeuristicTitle(lines: string[], idx: number): boolean {
   const line = lines[idx].trim()
   if (!line) return false
-  if (line.length > 30) return false
-  if (ENDING_PUNCTUATION.test(line)) return false
+  if (line.length > 20) return false
+
+  // 如果包含全角句号，极大概率是完整句子，绝非标题
+  if (line.includes('。')) return false
+
+  // 剥离末尾的装饰符、闭合括号、引号等
+  const strippedLine = line.replace(/[_*~"''“”‘’【】「」\(\)\[\]{}]+$/, '')
+  
+  // 检查剥离后的末尾是否为标点
+  if (/[，。！？、；：…—～,.!?;:]$/.test(strippedLine)) return false
 
   const prevEmpty = idx === 0 || lines[idx - 1].trim() === ''
   const nextEmpty = idx === lines.length - 1 || lines[idx + 1].trim() === ''
@@ -50,22 +60,9 @@ export function parseChapters(content: string, options: ParseOptions = {}): Chap
   const chapters: Chapter[] = []
   let chapterIndex = 0
   let globalParagraphIndex = 0
+  // 因为 splitParagraphs 现在是不忽略空行的一比一还原
+  // 所以每个非空行的段落索引就是它的行号 (lineIdx)
 
-  // 先统计每行开始的段落索引（段落 = 非空行块）
-  const lineToParagraph: number[] = new Array(lines.length).fill(-1)
-  let inParagraph = false
-  let paraIdx = 0
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i].trim() !== '') {
-      if (!inParagraph) {
-        inParagraph = true
-        paraIdx++
-      }
-      lineToParagraph[i] = paraIdx - 1
-    } else {
-      inParagraph = false
-    }
-  }
 
   // 检测候选标题行
   const titleLines: Array<{ lineIdx: number; title: string; strategy: string }> = []
@@ -80,6 +77,8 @@ export function parseChapters(content: string, options: ParseOptions = {}): Chap
       continue
     }
 
+    if (line.length > 20) continue
+
     // C. 缩进启发式
     if (isHeuristicTitle(lines, i)) {
       titleLines.push({ lineIdx: i, title: line, strategy: 'C' })
@@ -89,6 +88,12 @@ export function parseChapters(content: string, options: ParseOptions = {}): Chap
     // B. 英文 Chapter
     if (ENGLISH_CHAPTER_RE.test(line) || isRomanNumeral(line)) {
       titleLines.push({ lineIdx: i, title: line, strategy: 'B' })
+      continue
+    }
+
+    // B2. 纯数字章节
+    if (BARE_CHAPTER_RE.test(line)) {
+      titleLines.push({ lineIdx: i, title: line, strategy: 'B2' })
       continue
     }
 
@@ -109,7 +114,7 @@ export function parseChapters(content: string, options: ParseOptions = {}): Chap
   const dedupedTitles = titleLines.filter((t, idx) => {
     if (idx === 0) return true
     const prev = titleLines[idx - 1]
-    if (t.strategy === prev.strategy && t.lineIdx - prev.lineIdx < 10) {
+    if (t.strategy === prev.strategy && t.lineIdx - prev.lineIdx < 3) {
       return false
     }
     return true
@@ -122,14 +127,13 @@ export function parseChapters(content: string, options: ParseOptions = {}): Chap
 
   // 构建章节列表
   for (const { lineIdx, title } of dedupedTitles) {
-    const paraStart = lineToParagraph[lineIdx]
+    const paraStart = lineIdx
     chapters.push({
       index: chapterIndex++,
       title,
       startLine: lineIdx,
-      paragraphStart: paraStart >= 0 ? paraStart : globalParagraphIndex,
+      paragraphStart: paraStart,
     })
-    globalParagraphIndex++
   }
 
   return chapters
@@ -141,9 +145,7 @@ export function parseChapters(content: string, options: ParseOptions = {}): Chap
 export function splitParagraphs(content: string): string[] {
   const normalized = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
   const paragraphs = normalized
-    .split(/\n\s*\n+/)
-    .map((p) => p.trim())
-    .filter((p) => p.length > 0)
+    .split('\n')
   return paragraphs
 }
 
