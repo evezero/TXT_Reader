@@ -36,3 +36,8 @@
    npm run tauri build
    ```
    编译成功后，可执行文件位于 `src-tauri/target/release/txt-reader.exe`。
+
+
+## 📄 许可证
+
+本项目采用 [MIT License](LICENSE)。
