@@ -29,6 +29,7 @@ export interface FileMeta {
   progress: ReadingProgress
   bookmarks: Bookmark[]
   manualHeadings: number[]  // 手工标记的行号
+  ignoredHeadings?: number[] // 忽略的行号（删除的目录项）
   customSeparator?: string
   lastOpenedAt: number
 }
@@ -47,6 +48,7 @@ export interface Tab {
   meta?: FileMeta
   isDirty?: boolean
   errorMessage?: string
+  focusRequest?: { index: number; offset: number; timestamp: number }
 }
 
 // ─── 主题 ──────────────────────────────────────────────────────────────────

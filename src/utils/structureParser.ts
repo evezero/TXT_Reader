@@ -27,8 +27,8 @@ function isHeuristicTitle(lines: string[], idx: number): boolean {
   if (!line) return false
   if (line.length > 20) return false
 
-  // 如果包含全角句号，极大概率是完整句子，绝非标题
-  if (line.includes('。')) return false
+  // 如果包含全角或半角句号、逗号、顿号、叹号等，极大概率是完整句子或枚举，绝非标题
+  if (/[，。、！？,!?]/.test(line)) return false
 
   // 剥离末尾的装饰符、闭合括号、引号等
   const strippedLine = line.replace(/[_*~"''“”‘’【】「」\(\)\[\]{}]+$/, '')
@@ -53,6 +53,7 @@ function isCustomSeparator(line: string, separator?: string): boolean {
 export interface ParseOptions {
   customSeparator?: string
   manualHeadings?: number[]
+  ignoredHeadings?: number[]
 }
 
 export function parseChapters(content: string, options: ParseOptions = {}): Chapter[] {
@@ -70,6 +71,9 @@ export function parseChapters(content: string, options: ParseOptions = {}): Chap
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim()
     if (!line) continue
+
+    // 如果在忽略列表中，直接跳过不作为任何策略的候选
+    if (options.ignoredHeadings?.includes(i)) continue
 
     // E. 手工标记（最高优先）
     if (options.manualHeadings?.includes(i)) {

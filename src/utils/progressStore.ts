@@ -83,12 +83,25 @@ export function removeBookmark(meta: FileMeta, bookmarkId: string): FileMeta {
  * 添加手工标题标记
  */
 export function addManualHeading(meta: FileMeta, lineNumber: number): FileMeta {
-  if (meta.manualHeadings.includes(lineNumber)) {
+  if (meta.manualHeadings?.includes(lineNumber)) {
     return meta
   }
   return {
     ...meta,
-    manualHeadings: [...meta.manualHeadings, lineNumber].sort((a, b) => a - b),
+    manualHeadings: [...(meta.manualHeadings || []), lineNumber].sort((a, b) => a - b),
+  }
+}
+
+/**
+ * 忽略目录项（删除目录）
+ */
+export function addIgnoredHeading(meta: FileMeta, lineNumber: number): FileMeta {
+  if (meta.ignoredHeadings?.includes(lineNumber)) {
+    return meta
+  }
+  return {
+    ...meta,
+    ignoredHeadings: [...(meta.ignoredHeadings || []), lineNumber].sort((a, b) => a - b),
   }
 }
 
@@ -112,11 +125,11 @@ export function debouncedSaveMeta(filePath: string, meta: FileMeta, delay = 1000
 /**
  * 立即保存（窗口关闭时调用）
  */
-export function flushSaveMeta(filePath: string, meta: FileMeta): void {
+export async function flushSaveMeta(filePath: string, meta: FileMeta): Promise<void> {
   const existing = saveTimers.get(filePath)
   if (existing) {
     clearTimeout(existing)
     saveTimers.delete(filePath)
   }
-  saveMeta(filePath, meta)
+  await saveMeta(filePath, meta)
 }

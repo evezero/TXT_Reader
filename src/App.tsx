@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { WebviewWindow, getAllWebviewWindows } from '@tauri-apps/api/webviewWindow'
 import { LogicalSize } from '@tauri-apps/api/dpi'
-import { open } from '@tauri-apps/plugin-dialog'
+import { open, ask } from '@tauri-apps/plugin-dialog'
 import { TitleBar } from './components/TitleBar'
 import { TabBar } from './components/TabBar'
 import { Sidebar } from './components/Sidebar'
@@ -18,6 +19,7 @@ import {
   createDefaultMeta,
   addBookmark,
   removeBookmark,
+  addIgnoredHeading,
   addManualHeading,
   flushSaveMeta,
   saveMeta,
@@ -196,6 +198,7 @@ export default function App() {
         const chapters = parseChapters(content, {
           customSeparator: finalMeta.customSeparator,
           manualHeadings: finalMeta.manualHeadings,
+          ignoredHeadings: finalMeta.ignoredHeadings,
         })
         const paragraphs = splitParagraphs(content)
 
@@ -266,6 +269,7 @@ export default function App() {
       const chapters = parseChapters(newContent, {
         customSeparator: activeTab.meta?.customSeparator,
         manualHeadings: activeTab.meta?.manualHeadings,
+        ignoredHeadings: activeTab.meta?.ignoredHeadings,
       })
       const paragraphs = splitParagraphs(newContent)
       
@@ -283,10 +287,8 @@ export default function App() {
       const targetTab = tabs.find((t) => t.id === tabId)
       if (targetTab?.isDirty) {
         try {
-          const { ask } = await import('@tauri-apps/plugin-dialog')
           const yes = await ask(`文件已修改，是否保存？\n${targetTab.fileName}`, { title: '未保存的更改', kind: 'warning' })
           if (yes) {
-            const { invoke } = await import('@tauri-apps/api/core')
             const res = await invoke<any>('write_file', { path: targetTab.filePath, content: targetTab.content })
             if (!res.success) {
               addToast('保存失败: ' + res.error, 'error')
@@ -422,6 +424,44 @@ export default function App() {
     }
   }, [activeTab, activeTabId, addToast])
 
+  // ─── 窗口关闭拦截 ───────────────────────────────────────────────────────
+  const tabsRef = useRef(tabs)
+  useEffect(() => {
+    tabsRef.current = tabs
+  }, [tabs])
+
+  useEffect(() => {
+    let unlisten: () => void
+    const setupCloseInterceptor = async () => {
+      const appWindow = getCurrentWindow()
+      if (appWindow.label !== 'main') return
+
+      unlisten = await appWindow.onCloseRequested(async (event) => {
+        event.preventDefault()
+        
+        // 强制退出前将所有进度刷入磁盘
+        const flushPromises = tabsRef.current
+          .filter(t => t.filePath && t.meta)
+          .map(t => flushSaveMeta(t.filePath!, t.meta!))
+        await Promise.all(flushPromises)
+
+        const hasDirty = tabsRef.current.some(t => t.isDirty)
+        if (hasDirty) {
+          const confirmed = await ask('有修改未保存，确定要关闭吗？', { title: '未保存提示', kind: 'warning' })
+          if (confirmed) {
+            await invoke('force_exit')
+          }
+        } else {
+          await invoke('force_exit')
+        }
+      })
+    }
+    setupCloseInterceptor()
+    return () => {
+      if (unlisten) unlisten()
+    }
+  }, [])
+
   // ─── 键盘快捷键 ───────────────────────────────────────────────────────
   useEffect(() => {
     const handleKeyDown = async (e: KeyboardEvent) => {
@@ -432,14 +472,25 @@ export default function App() {
       }
 
       if (e.key === 'Escape' && isBossMode) {
-        setIsBossMode(false)
         try {
-          const { Window, getCurrentWindow } = await import('@tauri-apps/api/window')
-          const mainWindow = await Window.getByLabel('main')
-          if (mainWindow) {
-            await mainWindow.show()
+          const cur = getCurrentWindow()
+          
+          try {
+            const windows = await getAllWebviewWindows()
+            const mainWindow = windows.find(w => w.label === 'main')
+            if (mainWindow) {
+              await mainWindow.show()
+            }
+          } catch (e) {
+            console.error('Failed to show main window:', e)
           }
-          await getCurrentWindow().close()
+
+          try {
+            await cur.destroy()
+          } catch (e) {
+            console.error('Failed to destroy:', e)
+            await cur.close()
+          }
         } catch (err) {
           console.error('Failed to close boss mode window:', err)
         }
@@ -500,6 +551,7 @@ export default function App() {
         const chapters = parseChapters(activeTab.content ?? '', {
           customSeparator: newMeta.customSeparator,
           manualHeadings: newMeta.manualHeadings,
+          ignoredHeadings: newMeta.ignoredHeadings,
         })
         setTabs((prev) =>
           prev.map((t) =>
@@ -549,23 +601,78 @@ export default function App() {
 
   const effectiveTheme = THEMES.find((t) => t.id === getEffectiveTheme(systemDark))
 
-  const handleEditParagraph = useCallback(async (paraIndex: number, newText: string) => {
-    if (!activeTab || !activeTab.filePath || !activeTab.paragraphs) return
+  const handleParagraphAction = useCallback(async (action: { type: 'edit' | 'split' | 'mergePrev' | 'mergeNext' | 'markDirty', index: number, text?: string, offset?: number }) => {
+    if (!activeTab) return
+    if (action.type === 'markDirty') {
+      if (!activeTab.isDirty) {
+        setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, isDirty: true } : t))
+      }
+      return
+    }
+
+    if (!activeTab.paragraphs) return
     const newParagraphs = [...activeTab.paragraphs]
-    newParagraphs[paraIndex] = newText
+    let focusReq: { index: number, offset: number, timestamp: number } | undefined = undefined
+
+    if (action.type === 'edit') {
+      newParagraphs[action.index] = action.text ?? ''
+    } else if (action.type === 'split') {
+      const para = newParagraphs[action.index]
+      const offset = action.offset ?? 0
+      const p1 = para.slice(0, offset)
+      const p2 = para.slice(offset)
+      newParagraphs.splice(action.index, 1, p1, p2)
+      focusReq = { index: action.index + 1, offset: 0, timestamp: Date.now() }
+    } else if (action.type === 'mergePrev') {
+      if (action.index === 0) return
+      const prev = newParagraphs[action.index - 1]
+      const curr = newParagraphs[action.index]
+      newParagraphs[action.index - 1] = prev + curr
+      newParagraphs.splice(action.index, 1)
+      focusReq = { index: action.index - 1, offset: prev.length, timestamp: Date.now() }
+    } else if (action.type === 'mergeNext') {
+      if (action.index === newParagraphs.length - 1) return
+      const curr = newParagraphs[action.index]
+      const next = newParagraphs[action.index + 1]
+      newParagraphs[action.index] = curr + next
+      newParagraphs.splice(action.index + 1, 1)
+      focusReq = { index: action.index, offset: curr.length, timestamp: Date.now() }
+    }
+
     const newContent = newParagraphs.join('\n')
 
-    setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, content: newContent, paragraphs: newParagraphs, isDirty: true } : t))
+    setTabs(prev => prev.map(t => t.id === activeTabId ? { 
+      ...t, 
+      content: newContent, 
+      paragraphs: newParagraphs, 
+      isDirty: true,
+      focusRequest: focusReq ?? t.focusRequest 
+    } : t))
   }, [activeTab, activeTabId])
+
+  const handleChapterIgnore = useCallback((startLine: number) => {
+    if (!activeTab?.meta || !activeTab.filePath) return
+    const newMeta = addIgnoredHeading(activeTab.meta, startLine)
+    const chapters = parseChapters(activeTab.content ?? '', {
+      customSeparator: newMeta.customSeparator,
+      manualHeadings: newMeta.manualHeadings,
+      ignoredHeadings: newMeta.ignoredHeadings,
+    })
+    setTabs((prev) =>
+      prev.map((t) =>
+        t.id === activeTabId ? { ...t, meta: newMeta, chapters } : t
+      )
+    )
+    saveMeta(activeTab.filePath, newMeta)
+    addToast('已删除此目录项', 'success')
+  }, [activeTab, activeTabId, addToast])
 
   return (
     <div
       className={`app-root ${transitioning ? 'theme-transition' : ''} ${isBossMode ? 'boss-mode' : ''}`}
       onMouseDown={(e) => {
         if (isBossMode && e.button === 0) {
-          import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
-            getCurrentWindow().startDragging()
-          })
+          getCurrentWindow().startDragging()
         }
       }}
       style={{
@@ -603,7 +710,6 @@ export default function App() {
           activeTabId={activeTabId}
           onTabClick={setActiveTabId}
           onTabClose={handleCloseTab}
-          onSaveFile={handleSaveFile}
           onOpenFile={() => {
             if (activeTabId) {
               setActiveTabId(null)
@@ -725,9 +831,6 @@ export default function App() {
                 return
               }
               try {
-                const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow')
-                const { getCurrentWindow } = await import('@tauri-apps/api/window')
-                
                 const bossWindow = new WebviewWindow('boss-' + Date.now(), {
                   url: `/?boss=true&file=${encodeURIComponent(activeTab.filePath)}`,
                   width: 400,
@@ -789,7 +892,6 @@ export default function App() {
           </button>
         </div>
       )}
-
       {/* 摸鱼模式：纯文本，无任何 UI 元素 */}
 
       {/* 主体 */}
@@ -801,6 +903,7 @@ export default function App() {
             onChapterClick={handleChapterClick}
             onBookmarkClick={handleBookmarkClick}
             onBookmarkDelete={handleBookmarkDelete}
+            onChapterIgnore={handleChapterIgnore}
             collapsed={sidebarCollapsed}
           />
         )}
@@ -818,7 +921,7 @@ export default function App() {
                 onChapterChange={setCurrentChapterIndex}
                 manualHeadings={activeTab.meta?.manualHeadings ?? []}
                 onRelocateFile={handleOpenFile}
-                onEditParagraph={handleEditParagraph}
+                onParagraphAction={handleParagraphAction}
                 isBossMode={isBossMode}
               />
             </div>
@@ -831,7 +934,7 @@ export default function App() {
                   onChapterChange={() => {}}
                   manualHeadings={tabs.find(t => t.id === splitTabId)?.meta?.manualHeadings ?? []}
                   onRelocateFile={handleOpenFile}
-                  onEditParagraph={handleEditParagraph}
+                  onParagraphAction={handleParagraphAction}
                 />
                 {!isBossMode && (
                   <div style={{ position: 'absolute', top: 8, right: 16, zIndex: 10, display: 'flex', gap: 8, background: 'var(--panel-bg)', padding: '4px 8px', borderRadius: 4, boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}>
@@ -869,6 +972,8 @@ export default function App() {
           totalParagraphs={activeTab.paragraphs?.length ?? 0}
           currentParagraph={currentParagraphIndex}
           readingProgress={readingProgress}
+          isDirty={activeTab.isDirty}
+          onSave={handleSaveFile}
         />
       )}
 

@@ -7,6 +7,7 @@ interface SidebarProps {
   onChapterClick: (chapterIndex: number) => void
   onBookmarkClick: (chapterIndex: number, paragraphIndex: number) => void
   onBookmarkDelete: (bookmarkId: string) => void
+  onChapterIgnore: (startLine: number) => void
   collapsed: boolean
 }
 
@@ -18,9 +19,11 @@ export function Sidebar({
   onChapterClick,
   onBookmarkClick,
   onBookmarkDelete,
+  onChapterIgnore,
   collapsed,
 }: SidebarProps) {
   const [activeTab, setActiveTab] = useState<SidebarTab>('toc')
+  const [contextMenu, setContextMenu] = useState<{ x: number, y: number, chapter: Chapter } | null>(null)
 
   const chapters: Chapter[] = tab?.chapters ?? []
   const bookmarks: Bookmark[] = tab?.meta?.bookmarks ?? []
@@ -67,6 +70,10 @@ export function Sidebar({
                     <button
                       className={`chapter-item ${ch.index === currentChapterIndex ? 'active' : ''}`}
                       onClick={() => onChapterClick(ch.index)}
+                      onContextMenu={(e) => {
+                        e.preventDefault()
+                        setContextMenu({ x: e.pageX, y: e.pageY, chapter: ch })
+                      }}
                       title={ch.title}
                       style={{ width: '100%', border: 'none', background: 'none', textAlign: 'left', cursor: 'pointer' }}
                     >
@@ -127,6 +134,51 @@ export function Sidebar({
           </>
         )}
       </div>
+
+      {contextMenu && (
+        <>
+          <div 
+            style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 9999 }} 
+            onClick={() => setContextMenu(null)} 
+            onContextMenu={(e) => { e.preventDefault(); setContextMenu(null) }} 
+          />
+          <div 
+            style={{ 
+              position: 'fixed', 
+              top: contextMenu.y, 
+              left: contextMenu.x, 
+              zIndex: 10000, 
+              background: 'var(--panel-bg)', 
+              border: '1px solid var(--border)', 
+              borderRadius: 6, 
+              padding: '4px 0', 
+              boxShadow: '0 4px 12px rgba(0,0,0,0.15)' 
+            }}
+          >
+            <button 
+              style={{ 
+                width: '100%', 
+                background: 'none', 
+                border: 'none', 
+                padding: '8px 16px', 
+                textAlign: 'left', 
+                cursor: 'pointer', 
+                color: 'var(--text)', 
+                whiteSpace: 'nowrap',
+                fontSize: 13
+              }}
+              onMouseEnter={(e) => e.currentTarget.style.background = 'var(--active-bg)'}
+              onMouseLeave={(e) => e.currentTarget.style.background = 'none'}
+              onClick={() => {
+                onChapterIgnore(contextMenu.chapter.startLine)
+                setContextMenu(null)
+              }}
+            >
+              删除此目录项
+            </button>
+          </div>
+        </>
+      )}
     </aside>
   )
 }

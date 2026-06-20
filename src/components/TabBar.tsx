@@ -6,10 +6,9 @@ interface TabBarProps {
   onTabClick: (id: string) => void
   onTabClose: (id: string) => void
   onOpenFile: () => void
-  onSaveFile: () => void
 }
 
-export function TabBar({ tabs, activeTabId, onTabClick, onTabClose, onOpenFile, onSaveFile }: TabBarProps) {
+export function TabBar({ tabs, activeTabId, onTabClick, onTabClose, onOpenFile }: TabBarProps) {
   return (
     <div className="tabbar" role="tablist">
       {tabs.map((tab) => (
@@ -58,20 +57,6 @@ export function TabBar({ tabs, activeTabId, onTabClick, onTabClose, onOpenFile, 
         aria-label="打开新文件"
       >
         +
-      </button>
-
-      <button
-        className="tab-add"
-        style={{ marginLeft: 8 }}
-        onClick={onSaveFile}
-        title="保存修改 (Ctrl+S)"
-        aria-label="保存当前文件"
-      >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
-          <polyline points="17 21 17 13 7 13 7 21"></polyline>
-          <polyline points="7 3 7 8 15 8"></polyline>
-        </svg>
       </button>
 
       <button

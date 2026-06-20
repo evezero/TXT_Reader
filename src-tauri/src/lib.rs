@@ -155,6 +155,11 @@ fn write_file(path: String, content: String) -> WriteResult {
     }
 }
 
+#[tauri::command]
+fn force_exit() {
+    std::process::exit(0);
+}
+
 // ─── 应用启动 ──────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -169,6 +174,7 @@ pub fn run() {
             write_meta,
             file_exists,
             get_fonts,
+            force_exit,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

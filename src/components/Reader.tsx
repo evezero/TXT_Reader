@@ -1,4 +1,5 @@
-import { useEffect, useRef, useCallback, forwardRef, useImperativeHandle, useState } from 'react'
+import React, { forwardRef, useEffect, useImperativeHandle, useRef, useCallback, useState } from 'react'
+import { MemoizedParagraph } from './MemoizedParagraph'
 import type { Tab, ReaderStyle, Chapter } from '../types'
 import { findChapterByParagraph } from '../utils/structureParser'
 import { debouncedSaveMeta, updateProgress } from '../utils/progressStore'
@@ -16,17 +17,18 @@ interface ReaderProps {
   onChapterChange: (chapterIndex: number) => void
   manualHeadings: number[]
   onRelocateFile?: () => void
-  onEditParagraph?: (index: number, newText: string) => void
+  onParagraphAction?: (action: { type: 'edit' | 'split' | 'mergePrev' | 'mergeNext' | 'markDirty', index: number, text?: string, offset?: number }) => void
   isBossMode?: boolean
 }
 
 export const Reader = forwardRef<ReaderHandle, ReaderProps>(function Reader(
-  { tab, style, onProgressChange, onChapterChange, manualHeadings, onRelocateFile, onEditParagraph, isBossMode },
+  { tab, style, onProgressChange, onChapterChange, manualHeadings, onRelocateFile, onParagraphAction, isBossMode },
   ref
 ) {
   const containerRef = useRef<HTMLDivElement>(null)
   const paragraphRefs = useRef<Array<HTMLParagraphElement | null>>([])
   const currentParaRef = useRef(tab.meta?.progress?.paragraphIndex ?? 0)
+  const ignoreScrollRef = useRef<number>(0)
 
   const paragraphs = tab.paragraphs ?? []
   const chapters: Chapter[] = tab.chapters ?? []
@@ -36,11 +38,40 @@ export const Reader = forwardRef<ReaderHandle, ReaderProps>(function Reader(
     paragraphRefs.current = paragraphRefs.current.slice(0, paragraphs.length)
   }, [paragraphs.length])
 
+    const updateCurrentPara = useCallback((idx: number, fromUserAction = false) => {
+    if (fromUserAction) {
+      ignoreScrollRef.current = Date.now()
+    }
+    if (idx !== currentParaRef.current && idx >= 0 && idx < paragraphs.length) {
+      currentParaRef.current = idx
+      const currentChapter = findChapterByParagraph(chapters, idx)
+      if (currentChapter) {
+        onChapterChange(currentChapter.index)
+      }
+      onProgressChange(currentChapter?.index ?? 0, idx)
+
+      if (tab.meta && tab.filePath) {
+        const chapterIndex = currentChapter?.index ?? 0
+        const updatedMeta = updateProgress(tab.meta, {
+          chapterIndex,
+          paragraphIndex: idx,
+          scrollRatio: 0,
+        })
+        debouncedSaveMeta(tab.filePath, updatedMeta)
+      }
+    }
+  }, [chapters, onChapterChange, onProgressChange, paragraphs.length, tab.filePath, tab.meta])
+
+  const initialScrollDoneRef = useRef(false)
+
   // Scroll handler to detect current paragraph
   const handleScroll = useCallback(() => {
     if (!containerRef.current || paragraphs.length === 0) return
+    if (!initialScrollDoneRef.current && (tab.meta?.progress?.paragraphIndex ?? 0) > 0) return // 在恢复阅读进度之前，忽略所有滚动事件
+    if (Date.now() - ignoreScrollRef.current < 200) return // 忽略由键盘光标移动引起的自动滚动
+
     const container = containerRef.current
-    const { scrollTop, clientHeight } = container
+    const { scrollTop } = container
     
     // Find the first paragraph that is visible in the viewport
     let currentIdx = currentParaRef.current
@@ -66,42 +97,103 @@ export const Reader = forwardRef<ReaderHandle, ReaderProps>(function Reader(
       }
     }
 
-    if (currentIdx !== currentParaRef.current && currentIdx >= 0 && currentIdx < paragraphs.length) {
-      currentParaRef.current = currentIdx
-      const currentChapter = findChapterByParagraph(chapters, currentIdx)
-      if (currentChapter) {
-        onChapterChange(currentChapter.index)
-      }
-      onProgressChange(currentChapter?.index ?? 0, currentIdx)
-
-      if (tab.meta && tab.filePath) {
-        const chapterIndex = currentChapter?.index ?? 0
-        const updatedMeta = updateProgress(tab.meta, {
-          chapterIndex,
-          paragraphIndex: currentIdx,
-          scrollRatio: 0,
-        })
-        debouncedSaveMeta(tab.filePath, updatedMeta)
-      }
-    }
-  }, [paragraphs.length, chapters, onChapterChange, onProgressChange, tab.meta, tab.filePath])
+    updateCurrentPara(currentIdx)
+  }, [paragraphs.length, updateCurrentPara])
 
   // Initialize scroll position on load
   useEffect(() => {
     const initIdx = tab.meta?.progress?.paragraphIndex ?? 0
     if (initIdx > 0 && initIdx < paragraphs.length && containerRef.current) {
-      // use setTimeout to allow DOM to render
-      setTimeout(() => {
+      initialScrollDoneRef.current = false
+      let attempts = 0
+      
+      const tryScroll = () => {
         const el = paragraphRefs.current[initIdx]
         if (el && containerRef.current) {
+          ignoreScrollRef.current = Date.now() + 500 // 忽略刚跳转时引发的连续 scroll 事件
           containerRef.current.scrollTo({
             top: el.offsetTop - containerRef.current.offsetTop,
             behavior: 'auto'
           })
+          currentParaRef.current = initIdx
+          initialScrollDoneRef.current = true
+        } else if (attempts < 50) { // 最多尝试 5 秒 (50 * 100ms)
+          attempts++
+          setTimeout(tryScroll, 100)
+        } else {
+          // 放弃
+          initialScrollDoneRef.current = true
         }
-      }, 100)
+      }
+      tryScroll()
+    } else {
+      initialScrollDoneRef.current = true
     }
-  }, [tab.id]) // Only run when tab changes
+  }, [tab.id, paragraphs.length]) // Only run when tab or total paragraphs changes
+
+  // Handle focus request from App.tsx
+  useEffect(() => {
+    if (tab.focusRequest) {
+      const { index, offset, timestamp } = tab.focusRequest
+      // Check if this request is new
+      if (timestamp && Date.now() - timestamp < 1000) {
+        // give React a moment to render the new DOM structure
+        setTimeout(() => {
+          const el = paragraphRefs.current[index]
+          if (el) {
+            el.focus()
+            const sel = window.getSelection()
+            if (sel) {
+              const newRange = document.createRange()
+              // Try to find the text node to set cursor
+              if (el.firstChild && el.firstChild.nodeType === Node.TEXT_NODE) {
+                newRange.setStart(el.firstChild, Math.min(offset, el.firstChild.textContent?.length || 0))
+              } else {
+                // If it's an empty paragraph or has <br>, just focus it
+                newRange.selectNodeContents(el)
+                newRange.collapse(true)
+              }
+              sel.removeAllRanges()
+              sel.addRange(newRange)
+            }
+          }
+        }, 50)
+      }
+    }
+  }, [tab.focusRequest])
+
+  // Stable callbacks for MemoizedParagraph
+  const onParagraphActionRef = useRef(onParagraphAction)
+  useEffect(() => {
+    onParagraphActionRef.current = onParagraphAction
+  }, [onParagraphAction])
+
+  const updateCurrentParaRef = useRef(updateCurrentPara)
+  useEffect(() => {
+    updateCurrentParaRef.current = updateCurrentPara
+  }, [updateCurrentPara])
+
+  const handleParaFocus = useCallback((index: number) => {
+    if (updateCurrentParaRef.current) updateCurrentParaRef.current(index, true)
+  }, [])
+
+  const handleParaBlur = useCallback((index: number, textContent: string) => {
+    if (onParagraphActionRef.current) {
+      onParagraphActionRef.current({ type: 'edit', index, text: textContent })
+    }
+  }, [])
+
+  const handleParaDirty = useCallback(() => {
+    if (onParagraphActionRef.current) {
+      onParagraphActionRef.current({ type: 'markDirty', index: 0 })
+    }
+  }, [])
+
+  const handleParaKeyDownAction = useCallback((action: { type: 'split' | 'mergePrev' | 'mergeNext', index: number, offset?: number }) => {
+    if (onParagraphActionRef.current) {
+      onParagraphActionRef.current(action)
+    }
+  }, [])
 
   const isChapterTitle = useCallback(
     (paraIndex: number): boolean => {
@@ -201,131 +293,27 @@ export const Reader = forwardRef<ReaderHandle, ReaderProps>(function Reader(
           ref={containerRef}
           style={{ height: '100%', width: '100%', overflowY: 'auto' }}
           onScroll={handleScroll}
-          className="reader-scroll-view"
         >
-          <div style={{ height: 40 }} data-tauri-drag-region={isBossMode ? true : undefined} />
+          <div style={{ height: 40 }} />
           {paragraphs.map((para, index) => {
-            const isTitle = isChapterTitle(index)
-            const isMarked = isManualHeading(index)
             return (
-              <p
+              <MemoizedParagraph
                 key={index}
-                ref={(el) => { paragraphRefs.current[index] = el }}
-                className={`reader-paragraph ${isTitle ? 'chapter-title' : ''} ${isMarked ? 'marked-heading' : ''}`}
-                data-para-index={index}
-                data-tauri-drag-region={isBossMode ? true : undefined}
-                contentEditable={!isBossMode}
-                suppressContentEditableWarning
-                onBlur={(e) => {
-                  const newText = e.currentTarget.innerText
-                  if (newText !== para && onEditParagraph) {
-                    onEditParagraph(index, newText)
-                  }
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault()
-                    document.execCommand('insertText', false, '\n')
-                    return
-                  }
-                  const el = e.currentTarget
-                  const sel = window.getSelection()
-                  if (!sel || sel.rangeCount === 0) return
-                  const range = sel.getRangeAt(0)
-                  if (!range.collapsed) return // don't interfere with text selection
-
-                  const textContent = el.textContent || ''
-                  
-                  // Helper: get a flat text offset within the element
-                  const getOffset = (): number => {
-                    const preRange = document.createRange()
-                    preRange.selectNodeContents(el)
-                    preRange.setEnd(range.startContainer, range.startOffset)
-                    return preRange.toString().length
-                  }
-
-                  const offset = getOffset()
-                  const totalLen = textContent.length
-
-                  if (e.key === 'ArrowLeft') {
-                    if (offset === 0) {
-                      e.preventDefault()
-                      const prevEl = document.querySelector(`[data-para-index="${index - 1}"]`) as HTMLElement
-                      if (prevEl) {
-                        prevEl.focus()
-                        const newRange = document.createRange()
-                        newRange.selectNodeContents(prevEl)
-                        newRange.collapse(false) // end
-                        sel.removeAllRanges()
-                        sel.addRange(newRange)
-                      }
-                    }
-                  } else if (e.key === 'ArrowRight') {
-                    if (offset >= totalLen) {
-                      e.preventDefault()
-                      const nextEl = document.querySelector(`[data-para-index="${index + 1}"]`) as HTMLElement
-                      if (nextEl) {
-                        nextEl.focus()
-                        const newRange = document.createRange()
-                        newRange.selectNodeContents(nextEl)
-                        newRange.collapse(true) // start
-                        sel.removeAllRanges()
-                        sel.addRange(newRange)
-                      }
-                    }
-                  } else if (e.key === 'ArrowUp') {
-                    // Check if cursor is on the first visual line
-                    const caretRect = range.getBoundingClientRect()
-                    const elRect = el.getBoundingClientRect()
-                    // If cursor top is near element top (within one line height), we're on first line
-                    const lineH = parseFloat(getComputedStyle(el).lineHeight) || parseFloat(getComputedStyle(el).fontSize) * 1.5
-                    if (caretRect.top - elRect.top < lineH * 0.8 || offset === 0) {
-                      e.preventDefault()
-                      const prevEl = document.querySelector(`[data-para-index="${index - 1}"]`) as HTMLElement
-                      if (prevEl) {
-                        prevEl.focus()
-                        const newRange = document.createRange()
-                        newRange.selectNodeContents(prevEl)
-                        newRange.collapse(false) // go to end of prev paragraph
-                        sel.removeAllRanges()
-                        sel.addRange(newRange)
-                      }
-                    }
-                  } else if (e.key === 'ArrowDown') {
-                    // Check if cursor is on the last visual line
-                    const caretRect = range.getBoundingClientRect()
-                    const elRect = el.getBoundingClientRect()
-                    const lineH = parseFloat(getComputedStyle(el).lineHeight) || parseFloat(getComputedStyle(el).fontSize) * 1.5
-                    if (elRect.bottom - caretRect.bottom < lineH * 0.8 || offset >= totalLen) {
-                      e.preventDefault()
-                      const nextEl = document.querySelector(`[data-para-index="${index + 1}"]`) as HTMLElement
-                      if (nextEl) {
-                        nextEl.focus()
-                        const newRange = document.createRange()
-                        newRange.selectNodeContents(nextEl)
-                        newRange.collapse(true) // go to start of next paragraph
-                        sel.removeAllRanges()
-                        sel.addRange(newRange)
-                      }
-                    }
-                  }
-                }}
-                style={{
-                  margin: `0 auto var(--reader-para-spacing)`,
-                  fontSize: 'var(--reader-font-size)',
-                  lineHeight: 'var(--reader-line-height)',
-                  maxWidth: 'var(--reader-max-width)',
-                  textIndent: 'var(--reader-indent)',
-                  padding: '2px 48px',
-                  boxSizing: 'border-box',
-                  outline: 'none',
-                }}
-              >
-                {para === '' ? <br /> : para}
-              </p>
+                para={para}
+                index={index}
+                isTitle={isChapterTitle(index)}
+                isMarked={isManualHeading(index)}
+                isBossMode={!!isBossMode}
+                totalParagraphs={paragraphs.length}
+                onFocus={handleParaFocus}
+                onBlur={handleParaBlur}
+                onDirty={handleParaDirty}
+                onKeyDownAction={handleParaKeyDownAction}
+                setRef={(el) => { paragraphRefs.current[index] = el }}
+              />
             )
           })}
-          <div style={{ height: 120 }} data-tauri-drag-region={isBossMode ? true : undefined} />
+          <div style={{ height: 120 }} />
         </div>
       ) : (
         <div className="reader-inner">
